@@ -1,15 +1,13 @@
 // Azure function to handle file uploads through IoT Central's data export feature
+// built-in modules
+const fs = require('fs');
+const path = require('path');
+
+// open source modules that need to be npm installed
+const glob = require('glob');
+const zlib = require('zlib');
 
 module.exports = async function (context, req) {
-    // built-in modules
-    const fs = require('fs');
-    const path = require('path');
-
-    // open source modules that need to be npm installed
-    const glob = require('glob');
-    const zlib = require('zlib');
-
-    // paths
     const baseDir = path.join('c:', 'home', 'site', 'wwwroot', 'upload', 'files');
     const tempDir = path.join(baseDir, 'temp-uploads');
     const uploadDir = path.join(baseDir, 'file-uploads');
@@ -52,28 +50,26 @@ module.exports = async function (context, req) {
         const filenameBaseNoExt = filename.split('.').slice(0, -1).join('.');
         const filenameExt = path.extname(filename);
 
-        const part = req.body.messageProperties.part || 0;
-        if (part === 0) {
+        if (!req.body.messageProperties.part && req.body.messageProperties.part !== 0) {
             throw new Error('Missing message property: part');
         }
+        const part = Number(req.body.messageProperties.part);
 
         if (!req.body.messageProperties.maxPart) {
             throw new Error('Missing message property: maxPart');
         }
-
         const maxPart = Number(req.body.messageProperties.maxPart);
 
         if (!req.body.messageProperties.compression) {
             throw new Error('Missing message property: compression');
         }
-
         const compression = req.body.messageProperties.compression.toLowerCase();
         if (compression !== 'none' && compression !== 'deflate') {
             context.log(`compression message property is invalid, received: ${compression}`);
         }
 
         // log new file part
-        context.log.info(`device_id ${deviceId} file_id: ${id} part: ${part} of: ${maxPart.toString()} filepath: ${filepath} filename: ${filename}`);
+        context.log.info(`device_id ${deviceId} file_id: ${id} part: ${part} of: ${maxPart} filepath: ${filepath} filename: ${filename}`);
 
         // write out the file part
         fs.writeFileSync(path.join(tempDir, `${deviceId}.${id}.${maxPart}.${part}`), req.body.telemetry.contentChunk);
@@ -84,7 +80,7 @@ module.exports = async function (context, req) {
             // all expected file parts are available - time to rehydrate the file
             const encodedData = [];
             for (let i = 1; i <= maxPart; i++) {
-                const chunk = fs.readFileSync(path.join(tempDir, `${deviceId}.${id}.${maxPart}.${i.toString()}`));
+                const chunk = fs.readFileSync(path.join(tempDir, `${deviceId}.${id}.${maxPart}.${i}`));
                 encodedData.push(chunk);
             }
 
@@ -113,7 +109,7 @@ module.exports = async function (context, req) {
                 const tempFilename = path.join(tempDir, `${deviceId}.${id}.${maxPart}.${i}`);
 
                 try {
-                    fs.unlinkSync(path.join(tempDir, tempFilename));
+                    fs.unlinkSync(tempFilename);
                 }
                 catch (ex1) {
                     // pause and try this again incase there was a delay in releasing the file lock
@@ -122,15 +118,15 @@ module.exports = async function (context, req) {
 
                         await new Promise((resolve) => {
                             setTimeout(() => {
-                                fs.unlinkSync(path.join(tempDir, tempFilename));
+                                fs.unlinkSync(tempFilename);
 
-                                return resolve();
-                            }, 1000);
+                                return resolve('');
+                            }, 100);
                         });
                     }
                     catch (ex2) {
                         // failed a second time so log the error, the file will be caught and dead lettered at a later time
-                        context.log.error(`Error whilst cleaning up a temporary file: ${path.join(tempDir, tempFilename)} - ${ex2.message}`);
+                        context.log.error(`Error whilst cleaning up a temporary file: ${tempFilename} - ${ex2.message}`);
                     }
                 }
             }
