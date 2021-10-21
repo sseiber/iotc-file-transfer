@@ -1,168 +1,174 @@
 // Azure function to handle file uploads through IoT Central's data export feature
 
 module.exports = async function (context, req) {
-
     // built-in modules
     const fs = require('fs');
-    const path = require("path");
+    const path = require('path');
 
     // open source modules that need to be npm installed
-    const glob = require("glob");
+    const glob = require('glob');
     const zlib = require('zlib');
 
     // paths
-    const baseDir = path.join("c:", "home", "site", "wwwroot", "upload", "files");
-    const tempDir = path.join(baseDir, "temp-uploads");
-    const uploadDir = path.join(baseDir, "file-uploads");
-    const deadLetterDir = path.join(baseDir, "dead-letter");
-    
+    const baseDir = path.join('c:', 'home', 'site', 'wwwroot', 'upload', 'files');
+    const tempDir = path.join(baseDir, 'temp-uploads');
+    const uploadDir = path.join(baseDir, 'file-uploads');
+    const deadLetterDir = path.join(baseDir, 'dead-letter');
+
     // variables
     const deadLetterExpireTimeInHours = 12;
-    let status_code = 200;
-    let error_message = "";
+    let statusCode = 200;
+    let errorMessage = '';
 
     try {
         // make sure the needed directories are available
         if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir, { recursive: true });
         }
+
         if (!fs.existsSync(deadLetterDir)) {
             fs.mkdirSync(deadLetterDir, { recursive: true });
         }
+
         if (!fs.existsSync(uploadDir)) {
             fs.mkdirSync(uploadDir, { recursive: true });
         }
 
-        let deviceId = req.body.deviceId;
+        const deviceId = req.body.deviceId;
 
         // pull the message part meta data from the message properties
-        let id = "";
-        let filepath = "";
-        let filename = "";
-        let part = 0;
-        let maxPart = 0;
-        let compression = "none";
-
-        // check to make sure all the needed message properties have been sent
-        if ("id" in req.body.messageProperties) {
-            id = req.body.messageProperties.id;
-        } else {
-            throw "Missing message property: id";
+        const id = req.body.messageProperties.id || '';
+        if (!id) {
+            throw new Error('Missing message property: id');
         }
 
-        if ("id" in req.body.messageProperties) {
-            filepath = path.normalize(req.body.messageProperties.filepath);
-            filename = path.basename(filepath);
-            filepath = path.dirname(filepath);
-        } else {
-            throw "Missing message property: filepath";
+        const filepathProp = req.body.messageProperties.filepath || '';
+        if (filepathProp === '.') {
+            throw new Error('Missing message property: filepath');
         }
 
-        if ("part" in req.body.messageProperties) {
-            part = req.body.messageProperties.part;
-        } else {
-            throw "Missing message property: part";
+        const filepath = path.dirname(filepathProp);
+        const filename = path.basename(path.normalize(filepathProp));
+        const filenameBaseNoExt = filename.split('.').slice(0, -1).join('.');
+        const filenameExt = path.extname(filename);
+
+        const part = req.body.messageProperties.part || 0;
+        if (part === 0) {
+            throw new Error('Missing message property: part');
         }
 
-        if ("maxPart" in req.body.messageProperties) {
-            maxPart = Number(req.body.messageProperties.maxPart);
-        } else {
-            throw "Missing message property: maxPart";
+        if (!req.body.messageProperties.maxPart) {
+            throw new Error('Missing message property: maxPart');
         }
 
-        if ("compression" in req.body.messageProperties) {
-            compression = req.body.messageProperties.compression.toLowerCase();
-            if (compression != "none" && compression != "deflate") {
-                context.log("compression message property is invalid, received: " + compression);
-            }
-        } else {
-            throw "Missing message property: compression";
+        const maxPart = Number(req.body.messageProperties.maxPart);
+
+        if (!req.body.messageProperties.compression) {
+            throw new Error('Missing message property: compression');
+        }
+
+        const compression = req.body.messageProperties.compression.toLowerCase();
+        if (compression !== 'none' && compression !== 'deflate') {
+            context.log(`compression message property is invalid, received: ${compression}`);
         }
 
         // log new file part
-        context.log.info("device-id: " + deviceId + " file-id: " + id + " part: " + part + " of: " + maxPart.toString() + " filepath: " + filepath + " filename: " + filename);
+        context.log.info(`device_id ${deviceId} file_id: ${id} part: ${part} of: ${maxPart.toString()} filepath: ${filepath} filename: ${filename}`);
 
         // write out the file part
-        fs.writeFileSync(path.join(tempDir, (deviceId + "." + id + "." + maxPart + "." + part)), req.body.telemetry.contentChunk);
+        fs.writeFileSync(path.join(tempDir, `${deviceId}.${id}.${maxPart}.${part}`), req.body.telemetry.contentChunk);
 
         // check to see if all the file parts are available
-        let filePartCount = glob.sync(path.join(tempDir, (deviceId + "." + id + ".*"))).length;
-        if (filePartCount == maxPart) {
+        const filePartCount = glob.sync(path.join(tempDir, `${deviceId}.${id}.*`)).length;
+        if (filePartCount === maxPart) {
             // all expected file parts are available - time to rehydrate the file
-            let encodedData = "";
+            const encodedData = [];
             for (let i = 1; i <= maxPart; i++) {
-                let chunk = fs.readFileSync(path.join(tempDir, (deviceId + "." + id + "." + maxPart + "." + i.toString())));
-                encodedData = encodedData + chunk;
-            }
-            let buff = Buffer.from(encodedData, 'base64');
-            let dataBuff = null;
-            if (compression == "deflate") {
-                dataBuff = zlib.inflateSync(buff);
-            } else {
-                dataBuff = buff;
+                const chunk = fs.readFileSync(path.join(tempDir, `${deviceId}.${id}.${maxPart}.${i.toString()}`));
+                encodedData.push(chunk);
             }
 
-            // write out the rehydrated file 
+            const buff = Buffer.from(encodedData.join(''), 'base64');
+            const dataBuff = compression === 'deflate' ? zlib.inflateSync(buff) : buff;
+
+            // write out the rehydrated file
             const fullUploadDir = path.join(uploadDir, filepath);
             if (!fs.existsSync(fullUploadDir)) {
                 fs.mkdirSync(fullUploadDir, { recursive: true });
             }
+
+            let currentFilename = filename;
             if (fs.existsSync(path.join(fullUploadDir, filename))) {
                 // create a revision number between filename and extension
-                ext = path.extname(filename);
-                filename = filename.split('.').slice(0, -1).join('.');
-                let filesExistingCount = glob.sync(path.join(fullUploadDir, (filename + ".**" + ext))).length;
-                filename = filename + "." + (filesExistingCount + 1).toString() + ext;
+                const filesExistingCount = glob.sync(path.join(fullUploadDir, `${filenameBaseNoExt}.**${filenameExt}`)).length;
+                currentFilename = `${filenameBaseNoExt}.${filesExistingCount + 1}${filenameExt}`;
             }
-            context.log.info("writing out the file: " + filename);
-            fs.writeFileSync(path.join(fullUploadDir, filename), dataBuff);
+
+            context.log.info(`writing out the file: ${currentFilename}`);
+
+            fs.writeFileSync(path.join(fullUploadDir, currentFilename), dataBuff);
 
             // clean up the message parts
             for (let i = 1; i <= maxPart; i++) {
+                const tempFilename = path.join(tempDir, `${deviceId}.${id}.${maxPart}.${i}`);
+
                 try {
-                    fs.unlinkSync(path.join(tempDir, (deviceId + "." + id + "." + maxPart + "." + i.toString())));
-                } catch(e) {
+                    fs.unlinkSync(path.join(tempDir, tempFilename));
+                }
+                catch (ex1) {
                     // pause and try this again incase there was a delay in releasing the file lock
                     try {
-                        context.log.warn("Failure whilst cleaning up a temporary file retrying: " + path.join(tempDir, (deviceId + "." + id + "." + maxPart + "." + i.toString())));
-                        setTimeout(() => {
-                            fs.unlinkSync(path.join(tempDir, (deviceId + "." + id + "." + maxPart + "." + i.toString())));
-                        }, 1000);
-                    } catch(e) {
+                        context.log.warn(`Failure whilst cleaning up a temporary file retrying: ' + ${tempFilename} - ${ex1.message}`);
+
+                        await new Promise((resolve) => {
+                            setTimeout(() => {
+                                fs.unlinkSync(path.join(tempDir, tempFilename));
+
+                                return resolve();
+                            }, 1000);
+                        });
+                    }
+                    catch (ex2) {
                         // failed a second time so log the error, the file will be caught and dead lettered at a later time
-                        context.log.error("Error whilst cleaning up a temporary file: " + path.join(tempDir, (deviceId + "." + id + "." + maxPart + "." + i.toString())));
+                        context.log.error(`Error whilst cleaning up a temporary file: ${path.join(tempDir, tempFilename)} - ${ex2.message}`);
                     }
                 }
             }
         }
-        
+
         // check for expired files in temp directory and dead letter them
-        let files = fs.readdirSync(tempDir);
-        let dt = new Date();
+        const files = fs.readdirSync(tempDir);
+        const dt = new Date();
         dt.setHours(dt.getHours() - deadLetterExpireTimeInHours);
-        files.forEach(file => {
+
+        for (const file of files) {
             // a race condition can happen here where a file has been deleted after the list of files has been collected, handled in the exception catch
             try {
-                const { birthtime } = fs.statSync(path.join(tempDir, file));  
+                const { birthtime } = fs.statSync(path.join(tempDir, file));
                 if (dt > birthtime) {
                     fs.renameSync(path.join(tempDir, file), path.join(deadLetterDir, file));
                 }
-            } catch(e) {
-                // none essential exception this will be called again so just log it
-                context.log.warn("Exception occured during dead-letter cleanup. Details: " + e)
             }
-        });
-    } catch (e) {
+            catch (exExpired) {
+                // none essential exception this will be called again so just log it
+                context.log.warn(`Exception occured during dead-letter cleanup. Details: ${exExpired.message}`);
+            }
+        }
+    }
+    catch (ex) {
         // log any exceptions as errors
-        context.log.error("Exception thrown: " + e);
-        error_message = e;
-        status_code = 500;
-    } finally {
+        errorMessage = ex.message;
+        statusCode = 500;
+
+        context.log.error(`Exception thrown: ${errorMessage}`);
+    }
+    finally {
         // return success or failure
         context.res = {
-            status: status_code,
-            body: error_message
+            status: statusCode,
+            body: errorMessage
         };
+
         context.done();
     }
-}
+};
